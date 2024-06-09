@@ -13,6 +13,7 @@
 #include "stdio.h"
 #include "global.h"
 #include "menu.h"
+#include "ctype.h"
 
 #define COUNTER_1_US 13
 
@@ -27,6 +28,16 @@
 
 #define N_ROWS 4
 #define N_COLS 4
+
+//DAC voltage reference in milivolts
+#define DAC_VREF_MV 3300
+
+//DAC resolutions. Value of 2^n
+#define DAC_RES_BITS 4096
+
+/****************************
+ * Global vars and structs
+ ****************************/
 
 typedef struct {
 	uint16_t intervalInMs;
@@ -68,29 +79,135 @@ uint8_t keypadKeyMapping[] = {
 
 char stringToPrint[16] = "                ";
 
-void backlightOn()
+/*******************************
+ * End global vars and structs
+ *******************************/
+
+/*******************************
+ * Function prototypes
+ *******************************/
+void writeDAC(uint16_t valueInMv);
+void initGPIO();
+void backlightOn();
+void backlightOff();
+void delay_us (uint16_t timeInUs);
+uint8_t taskIsReadtToRun(taskData *task);
+void LCDTask();
+void keypadTask();
+void counterTask();
+uint32_t getGlobalSystickValue();
+void taskHandler();
+void writeDAC(uint16_t valueInMv);
+
+/*******************************
+ * End function prototypes
+ *******************************/
+
+int main(void)
 {
-	GPIO_SetBits(BACKLIGHT_PORT, BACKLIGHT_PIN);
-	backlightState = 1;
-}
-void backlightOff()
-{
-	GPIO_ResetBits(BACKLIGHT_PORT, BACKLIGHT_PIN);
-	backlightState = 0;
-}
-void delay_ms(uint16_t timeInMs)
-{
-	timeInMs += systickGlobal;
-	while (timeInMs > systickGlobal);
+	SysTick_Config(SystemCoreClock / 1000);
+
+	initGPIO();
+
+	LCDTaskData.intervalInMs = 250;
+	keypadTaskData.intervalInMs = 10;
+	counterTaskData.intervalInMs = 1000;
+
+	while(1)
+	{
+		taskHandler();
+	}
 }
 
-void delay_us (uint16_t timeInUs)
+void initGPIO()
 {
-	for(uint16_t j = 0; j < timeInUs; j++)
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
+
+	GPIO_InitTypeDef GPIO_InitStruct;
+	DAC_InitTypeDef DAC_InitStruct;
+	//ADC_InitTypeDef ADC_InitStructure;
+
+	//Inicializo BACKLIGHT
+	GPIO_InitStruct.GPIO_Pin = BACKLIGHT_PIN;
+	GPIO_InitStruct.GPIO_Mode = GPIO_Mode_OUT;
+	GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;
+	GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_NOPULL;
+	GPIO_Init(BACKLIGHT_PORT, &GPIO_InitStruct);
+
+	//Init Keypad
+	keypadInitStruct.nRows = N_ROWS;
+	keypadInitStruct.nCols = N_COLS;
+
+	keypadInitStruct.rowPins = rowsPortPin;
+	keypadInitStruct.colPins = colsPortPin;
+	keypadInitStruct.keyMapping = keypadKeyMapping;
+
+	keypadInit(keypadInitStruct);
+
+	//Init DAC GPIO A4
+	GPIO_InitStruct.GPIO_Pin = GPIO_Pin_4;
+	GPIO_InitStruct.GPIO_Mode = GPIO_Mode_AN;
+	GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_NOPULL;
+	GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_DAC, ENABLE);
+
+	DAC_InitStruct.DAC_Trigger = DAC_Trigger_None;
+	DAC_InitStruct.DAC_WaveGeneration = DAC_WaveGeneration_None;
+	DAC_InitStruct.DAC_OutputBuffer = DAC_OutputBuffer_Enable;
+	DAC_Init(DAC_Channel_1, &DAC_InitStruct);
+
+	DAC_Cmd(DAC_Channel_1, ENABLE);
+
+
+	/*
+	//Init ADC
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
+	ADC_StructInit(&ADC_InitStructure);
+	ADC_InitStructure.ADC_Resolution = ADC_Resolution_12b;
+	ADC_InitStructure.ADC_ScanConvMode = ENABLE;
+	ADC_InitStructure.ADC_ContinuousConvMode = DISABLE;
+	ADC_InitStructure.ADC_ExternalTrigConvEdge = ADC_ExternalTrigConvEdge_None;
+	ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Right;
+	ADC_InitStructure.ADC_NbrOfConversion = 1;
+	ADC_Init(ADC1, &ADC_InitStructure);
+
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_6, 1, ADC_SampleTime_3Cycles);
+
+	//Enable ADC
+	ADC_Cmd(ADC1, ENABLE);
+	*/
+
+	LCD_init();
+	backlightOn();
+}
+
+
+/*******************************
+ * Handler and Tasks functions
+ *******************************/
+void taskHandler()
+{
+	if(tick)
 	{
-		for (uint16_t i = 0; i < COUNTER_1_US; i++)
+		tick = 0;
+		if (taskIsReadtToRun(&LCDTaskData))
 		{
-			continue;
+			LCDTaskData.startTimeInMs = systickGlobal;
+			LCDTask();
+		}
+		if (taskIsReadtToRun(&keypadTaskData))
+		{
+			keypadTaskData.startTimeInMs = systickGlobal;
+			keypadTask();
+		}
+		if (taskIsReadtToRun(&counterTaskData))
+		{
+			counterTaskData.startTimeInMs = systickGlobal;
+			counterTask();
 		}
 	}
 }
@@ -170,6 +287,17 @@ void keypadTask()
 				case '*':
 					backlightOff();
 				break;
+
+				default:
+					if (isdigit(pressedKey))
+					{
+						//I should ask for the current menu level before setting up the DAC value.
+						uint16_t selectedValueInMv;
+						selectedValueInMv = (pressedKey - 48) * 100;
+						menuSetDACValue(selectedValueInMv);
+						writeDAC(selectedValueInMv);
+					}
+				break;
 			}
 
 			keypadTaskState = ST_KEY_WAITING_RELEASE;
@@ -189,6 +317,31 @@ void counterTask()
 	counter++;
 }
 
+/***********************************
+ * End Handler and Tasks functions
+ ***********************************/
+
+/****************************
+ * Timing functions
+ ****************************/
+void delay_us (uint16_t timeInUs)
+{
+	for(uint16_t j = 0; j < timeInUs; j++)
+	{
+		for (uint16_t i = 0; i < COUNTER_1_US; i++)
+		{
+			continue;
+		}
+	}
+}
+
+void delay_ms(uint16_t timeInMs)
+{
+	timeInMs += systickGlobal;
+	while (timeInMs > systickGlobal);
+}
+
+
 void SysTick_Handler(void)
 {
 	systickGlobal++;
@@ -199,72 +352,41 @@ uint32_t getGlobalSystickValue()
 {
 	return systickGlobal;
 }
+/****************************
+ * End timing functions
+ ****************************/
 
-void taskHandler()
+/****************************
+ * Analog functions
+ ****************************/
+
+void writeDAC(uint16_t valueInMv)
 {
-	if(tick)
-	{
-		tick = 0;
-		if (taskIsReadtToRun(&LCDTaskData))
-		{
-			LCDTaskData.startTimeInMs = systickGlobal;
-			LCDTask();
-		}
-		if (taskIsReadtToRun(&keypadTaskData))
-		{
-			keypadTaskData.startTimeInMs = systickGlobal;
-			keypadTask();
-		}
-		if (taskIsReadtToRun(&counterTaskData))
-		{
-			counterTaskData.startTimeInMs = systickGlobal;
-			counterTask();
-		}
-	}
+	//This is the minimum change in milivolts handled by the DAC.
+	float DACResolutionInMv = (float)DAC_VREF_MV / (float)DAC_RES_BITS;
 
+	uint16_t DACValue = valueInMv / DACResolutionInMv;
+	DAC_SetChannel1Data(DAC_Align_12b_R, DACValue);
 }
 			
-void initGPIO()
+/****************************
+ * End analog functions
+ ****************************/
+
+/****************************
+ * Other functions
+ ****************************/
+void backlightOn()
 {
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
-
-	GPIO_InitTypeDef GPIO_InitStruct;
-
-	//Inicializo BACKLIGHT
-	GPIO_InitStruct.GPIO_Pin = BACKLIGHT_PIN;
-	GPIO_InitStruct.GPIO_Mode = GPIO_Mode_OUT;
-	GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;
-	GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_NOPULL;
-	GPIO_Init(BACKLIGHT_PORT, &GPIO_InitStruct);
-
-	keypadInitStruct.nRows = N_ROWS;
-	keypadInitStruct.nCols = N_COLS;
-
-	keypadInitStruct.rowPins = rowsPortPin;
-	keypadInitStruct.colPins = colsPortPin;
-	keypadInitStruct.keyMapping = keypadKeyMapping;
-
-	keypadInit(keypadInitStruct);
-
-	LCD_init();
-	backlightOn();
+	GPIO_SetBits(BACKLIGHT_PORT, BACKLIGHT_PIN);
+	backlightState = 1;
+}
+void backlightOff()
+{
+	GPIO_ResetBits(BACKLIGHT_PORT, BACKLIGHT_PIN);
+	backlightState = 0;
 }
 
-int main(void)
-{
-	SysTick_Config(SystemCoreClock / 1000);
-
-	initGPIO();
-
-	LCDTaskData.intervalInMs = 250;
-	keypadTaskData.intervalInMs = 10;
-	counterTaskData.intervalInMs = 1000;
-
-	while(1)
-	{
-		taskHandler();
-	}
-}
+/****************************
+ * End other functions
+ ****************************/

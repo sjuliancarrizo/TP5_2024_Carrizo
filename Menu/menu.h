@@ -34,6 +34,8 @@ uint8_t getMenuHasChanged();
 void menuSetPressedKey(uint8_t key);
 void menuSetCounter(uint16_t counter);
 void menuSetBacklight(uint8_t backlightState);
+void menuSetDACValue(uint16_t DACValueInMv);
+void menuSetTempValue(float tempValue);
 
 
 

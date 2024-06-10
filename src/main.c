@@ -29,11 +29,20 @@
 #define N_ROWS 4
 #define N_COLS 4
 
-//DAC voltage reference in milivolts
-#define DAC_VREF_MV 3300
+//Analog voltage reference in milivolts
+#define ANALOG_VREF_MV 3300
 
 //DAC resolutions. Value of 2^n
 #define DAC_RES_BITS 4096
+
+//ADC resolutions. Value of 2^n
+#define ADC_RES_BITS 4096
+
+//Number of samples the ADC must take before calculating the analog value.
+#define ADC_SAMPLES 8
+
+//Time in ms between ADC samples.
+#define ADC_SAMPLES_INTERVAL 10
 
 /****************************
  * Global vars and structs
@@ -50,11 +59,18 @@ typedef enum{
 	ST_KEY_WAITING_RELEASE
 } keypadStates;
 
+typedef enum{
+	ST_IDLE = 0,
+	ST_SAMPLING,
+	ST_GET_VALUE
+} analogStates;
+
 uint32_t systickGlobal = 0;
 uint8_t pressedKey = NO_KEY, tick = 0, firstKey = 0, backlightState;
-uint16_t counter = 0;
+uint16_t counter = 0, DACSelectedValueInMv = 0, DACCurrentValueInMv = 0, ADCValue;
+float ADCValueInMv;
 
-taskData LCDTaskData, keypadTaskData, counterTaskData;
+taskData LCDTaskData, keypadTaskData, counterTaskData, analogTaskData;
 
 keypad_InitTypeDef keypadInitStruct;
 
@@ -95,9 +111,11 @@ uint8_t taskIsReadtToRun(taskData *task);
 void LCDTask();
 void keypadTask();
 void counterTask();
+void analogTask();
 uint32_t getGlobalSystickValue();
 void taskHandler();
 void writeDAC(uint16_t valueInMv);
+void readADCCh7(uint16_t *value);
 
 /*******************************
  * End function prototypes
@@ -113,6 +131,12 @@ int main(void)
 	keypadTaskData.intervalInMs = 10;
 	counterTaskData.intervalInMs = 1000;
 
+	/*
+	 * This also affects the interval the DAC is updated.
+	 * It may not be desired though.
+	 */
+	analogTaskData.intervalInMs = ADC_SAMPLES * ADC_SAMPLES_INTERVAL;
+
 	while(1)
 	{
 		taskHandler();
@@ -127,7 +151,7 @@ void initGPIO()
 
 	GPIO_InitTypeDef GPIO_InitStruct;
 	DAC_InitTypeDef DAC_InitStruct;
-	//ADC_InitTypeDef ADC_InitStructure;
+	ADC_InitTypeDef ADC_InitStructure;
 
 	//Inicializo BACKLIGHT
 	GPIO_InitStruct.GPIO_Pin = BACKLIGHT_PIN;
@@ -162,10 +186,14 @@ void initGPIO()
 
 	DAC_Cmd(DAC_Channel_1, ENABLE);
 
+	//Init ADC 1 / GPIOA 7 Channel 7
+	GPIO_InitStruct.GPIO_Pin = GPIO_Pin_7;
+	GPIO_InitStruct.GPIO_Mode = GPIO_Mode_AN;
+	GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_NOPULL;
+	GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-	/*
-	//Init ADC
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
+
 	ADC_StructInit(&ADC_InitStructure);
 	ADC_InitStructure.ADC_Resolution = ADC_Resolution_12b;
 	ADC_InitStructure.ADC_ScanConvMode = ENABLE;
@@ -175,11 +203,11 @@ void initGPIO()
 	ADC_InitStructure.ADC_NbrOfConversion = 1;
 	ADC_Init(ADC1, &ADC_InitStructure);
 
-	ADC_RegularChannelConfig(ADC1, ADC_Channel_6, 1, ADC_SampleTime_3Cycles);
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_7, 1, ADC_SampleTime_3Cycles);
 
 	//Enable ADC
 	ADC_Cmd(ADC1, ENABLE);
-	*/
+
 
 	LCD_init();
 	backlightOn();
@@ -208,6 +236,11 @@ void taskHandler()
 		{
 			counterTaskData.startTimeInMs = systickGlobal;
 			counterTask();
+		}
+		if (taskIsReadtToRun(&analogTaskData))
+		{
+			analogTaskData.startTimeInMs = systickGlobal;
+			analogTask();
 		}
 	}
 }
@@ -292,10 +325,9 @@ void keypadTask()
 					if (isdigit(pressedKey))
 					{
 						//I should ask for the current menu level before setting up the DAC value.
-						uint16_t selectedValueInMv;
-						selectedValueInMv = (pressedKey - 48) * 100;
-						menuSetDACValue(selectedValueInMv);
-						writeDAC(selectedValueInMv);
+						DACSelectedValueInMv = (pressedKey - 48) * 100;
+						if (DACSelectedValueInMv != DACCurrentValueInMv)
+							menuSetDACValue(DACSelectedValueInMv);
 					}
 				break;
 			}
@@ -311,6 +343,52 @@ void keypadTask()
 
 	}
 }
+
+void analogTask()
+{
+	static analogStates analogTaskState = ST_IDLE;
+	static uint8_t currentSampleIndex = 0;
+	static uint16_t accumulativeADCValue = 0;
+	static float ADCResolutionInMv = (float)ANALOG_VREF_MV / (float)ADC_RES_BITS;
+	uint16_t temp;
+
+	if (DACSelectedValueInMv != DACCurrentValueInMv)
+	{
+		DACCurrentValueInMv = DACSelectedValueInMv;
+		writeDAC(DACCurrentValueInMv);
+	}
+
+	switch (analogTaskState)
+	{
+		case ST_IDLE:
+			currentSampleIndex = 0;
+			accumulativeADCValue = 0;
+			temp = 0;
+			analogTaskState = ST_SAMPLING;
+
+		break;
+
+		case ST_SAMPLING:
+			if (currentSampleIndex < ADC_SAMPLES)
+			{
+				readADCCh7(&temp);
+				accumulativeADCValue += temp;
+				currentSampleIndex++;
+			}
+			else
+				analogTaskState = ST_GET_VALUE;
+		break;
+
+		case ST_GET_VALUE:
+			accumulativeADCValue /= ADC_SAMPLES;
+			ADCValueInMv = accumulativeADCValue * ADCResolutionInMv;
+			//I'm sending voltage, not temp. This is just for testing.
+			menuSetTempValue(ADCValueInMv);
+			analogTaskState = ST_IDLE;
+		break;
+	}
+}
+
 
 void counterTask()
 {
@@ -363,10 +441,18 @@ uint32_t getGlobalSystickValue()
 void writeDAC(uint16_t valueInMv)
 {
 	//This is the minimum change in milivolts handled by the DAC.
-	float DACResolutionInMv = (float)DAC_VREF_MV / (float)DAC_RES_BITS;
+	float DACResolutionInMv = (float)ANALOG_VREF_MV / (float)DAC_RES_BITS;
 
 	uint16_t DACValue = valueInMv / DACResolutionInMv;
 	DAC_SetChannel1Data(DAC_Align_12b_R, DACValue);
+}
+
+void readADCCh7(uint16_t *value)
+{
+	ADC_SoftwareStartConv(ADC1);
+
+	while (ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC) == RESET);
+	*value = ADC_GetConversionValue(ADC1);
 }
 			
 /****************************

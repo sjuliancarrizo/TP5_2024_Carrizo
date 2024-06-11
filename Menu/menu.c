@@ -189,3 +189,12 @@ uint8_t getMenuHasChanged()
 {
 	return _menuHasChanged;
 }
+uint8_t getMenuCurrentLevel()
+{
+	return _menuCurrentLevel;
+}
+
+uint8_t getMenuCurrentItem()
+{
+	return _cursorCurrentItem;
+}

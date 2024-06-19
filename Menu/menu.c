@@ -16,8 +16,8 @@ char menuL0Item[MENU_ITEMS][MENU_LINE_LENGTH] = {
 		" Tecla Presionad\0",
 		" Backlight      \0",
 		" Contador       \0",
-		" Datos Alumno   \0",
-		" Datos Materia  \0"
+		" Generador DAC  \0",
+		" Medicion TEMP  \0"
 };
 
 uint8_t _cursorCurrentItem = 0;
@@ -25,6 +25,8 @@ uint8_t _menuCurrentLevel = 0;
 uint8_t _menuHasChanged = 1;
 uint8_t _key;
 uint16_t _counter;
+uint16_t _DACValueInMv;
+float _tempValueInC, _tempValueInF;
 uint8_t _backlightState;
 char menuLine[MENU_LINES][MENU_LINE_LENGTH];
 
@@ -120,12 +122,14 @@ void buildMenu()
 		break;
 
 		case 3:
-			strcpy(menuLine[0],"Julian");
-			strcpy(menuLine[1],"Carrizo");
+			sprintf(stringToPrint, "DAC: %d mV", _DACValueInMv);
+			strcpy(menuLine[0],stringToPrint);
 		break;
 		case 4:
-			strcpy(menuLine[0],"Ing. A. Laiuppa");
-			strcpy(menuLine[1],"Tec. Digitales 2");
+			sprintf(stringToPrint, "TEMP: %.2f \262C", _tempValueInC);
+			strcpy(menuLine[0],stringToPrint);
+			sprintf(stringToPrint, "TEMP: %.2f \262F", _tempValueInF);
+			strcpy(menuLine[1],stringToPrint);
 		break;
 		}
 	}
@@ -157,6 +161,25 @@ void menuSetBacklight(uint8_t backlightState)
 	}
 }
 
+void menuSetDACValue(uint16_t DACValueInMv)
+{
+	if (DACValueInMv != _DACValueInMv)
+	{
+		_DACValueInMv = DACValueInMv;
+		_menuHasChanged = 1;
+	}
+}
+
+void menuSetTempValue(float tempValueInC, float tempValueInF)
+{
+	if ((tempValueInC != _tempValueInC) && (tempValueInF != _tempValueInF))
+	{
+		_tempValueInC = tempValueInC;
+		_tempValueInF = tempValueInF;
+		_menuHasChanged = 1;
+	}
+}
+
 uint8_t getStringLine(uint8_t lineIndex, uint8_t lineLength, char stringLine[MENU_LINE_LENGTH])
 {
 	if (lineLength != MENU_LINE_LENGTH || lineIndex >= MENU_LINES)
@@ -168,4 +191,13 @@ uint8_t getStringLine(uint8_t lineIndex, uint8_t lineLength, char stringLine[MEN
 uint8_t getMenuHasChanged()
 {
 	return _menuHasChanged;
+}
+uint8_t getMenuCurrentLevel()
+{
+	return _menuCurrentLevel;
+}
+
+uint8_t getMenuCurrentItem()
+{
+	return _cursorCurrentItem;
 }

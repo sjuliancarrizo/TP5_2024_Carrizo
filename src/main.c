@@ -13,6 +13,9 @@
 #include "stdio.h"
 #include "global.h"
 #include "menu.h"
+#include "ctype.h"
+#include "analog.h"
+#include "ntc.h"
 
 #define COUNTER_1_US 13
 
@@ -28,6 +31,16 @@
 #define N_ROWS 4
 #define N_COLS 4
 
+//Number of samples the ADC must take before calculating the analog value.
+#define ADC_SAMPLES 16
+
+//Time in ms between ADC samples.
+#define ADC_SAMPLES_INTERVAL 5
+
+/****************************
+ * Global vars and structs
+ ****************************/
+
 typedef struct {
 	uint16_t intervalInMs;
 	uint32_t startTimeInMs;
@@ -39,11 +52,19 @@ typedef enum{
 	ST_KEY_WAITING_RELEASE
 } keypadStates;
 
+typedef enum{
+	ST_IDLE = 0,
+	ST_SAMPLING,
+	ST_GET_VALUE
+} analogStates;
+
 uint32_t systickGlobal = 0;
 uint8_t pressedKey = NO_KEY, tick = 0, firstKey = 0, backlightState;
-uint16_t counter = 0;
+uint16_t counter = 0, DACSelectedValueInMv = 0, DACCurrentValueInMv = 0, ADCValue;
+float ADCValueInMv;
+float NTCValueInC, NTCValueInF;
 
-taskData LCDTaskData, keypadTaskData, counterTaskData;
+taskData LCDTaskData, keypadTaskData, counterTaskData, analogTaskData;
 
 keypad_InitTypeDef keypadInitStruct;
 
@@ -68,29 +89,111 @@ uint8_t keypadKeyMapping[] = {
 
 char stringToPrint[16] = "                ";
 
-void backlightOn()
+/*******************************
+ * End global vars and structs
+ *******************************/
+
+/*******************************
+ * Function prototypes
+ *******************************/
+void initGPIO();
+void backlightOn();
+void backlightOff();
+void delay_us (uint16_t timeInUs);
+uint8_t taskIsReadtToRun(taskData *task);
+void LCDTask();
+void keypadTask();
+void counterTask();
+void analogTask();
+uint32_t getGlobalSystickValue();
+void taskHandler();
+
+/*******************************
+ * End function prototypes
+ *******************************/
+
+int main(void)
 {
-	GPIO_SetBits(BACKLIGHT_PORT, BACKLIGHT_PIN);
-	backlightState = 1;
-}
-void backlightOff()
-{
-	GPIO_ResetBits(BACKLIGHT_PORT, BACKLIGHT_PIN);
-	backlightState = 0;
-}
-void delay_ms(uint16_t timeInMs)
-{
-	timeInMs += systickGlobal;
-	while (timeInMs > systickGlobal);
+	SysTick_Config(SystemCoreClock / 1000);
+
+	initGPIO();
+	initDAC();
+	initADC();
+
+	LCDTaskData.intervalInMs = 250;
+	keypadTaskData.intervalInMs = 10;
+	counterTaskData.intervalInMs = 1000;
+
+	/*
+	 * This also affects the interval the DAC is updated.
+	 * It may not be desired though.
+	 */
+	analogTaskData.intervalInMs = ADC_SAMPLES * ADC_SAMPLES_INTERVAL;
+
+	while(1)
+	{
+		taskHandler();
+	}
 }
 
-void delay_us (uint16_t timeInUs)
+void initGPIO()
 {
-	for(uint16_t j = 0; j < timeInUs; j++)
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
+
+	GPIO_InitTypeDef GPIO_InitStruct;
+
+	//Inicializo BACKLIGHT
+	GPIO_InitStruct.GPIO_Pin = BACKLIGHT_PIN;
+	GPIO_InitStruct.GPIO_Mode = GPIO_Mode_OUT;
+	GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;
+	GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_NOPULL;
+	GPIO_Init(BACKLIGHT_PORT, &GPIO_InitStruct);
+
+	//Init Keypad
+	keypadInitStruct.nRows = N_ROWS;
+	keypadInitStruct.nCols = N_COLS;
+
+	keypadInitStruct.rowPins = rowsPortPin;
+	keypadInitStruct.colPins = colsPortPin;
+	keypadInitStruct.keyMapping = keypadKeyMapping;
+
+	keypadInit(keypadInitStruct);
+
+	LCD_init();
+	backlightOn();
+}
+
+
+/*******************************
+ * Handler and Tasks functions
+ *******************************/
+void taskHandler()
+{
+	if(tick)
 	{
-		for (uint16_t i = 0; i < COUNTER_1_US; i++)
+		tick = 0;
+		if (taskIsReadtToRun(&LCDTaskData))
 		{
-			continue;
+			LCDTaskData.startTimeInMs = systickGlobal;
+			LCDTask();
+		}
+		if (taskIsReadtToRun(&keypadTaskData))
+		{
+			keypadTaskData.startTimeInMs = systickGlobal;
+			keypadTask();
+		}
+		if (taskIsReadtToRun(&counterTaskData))
+		{
+			counterTaskData.startTimeInMs = systickGlobal;
+			counterTask();
+		}
+		if (taskIsReadtToRun(&analogTaskData))
+		{
+			analogTaskData.startTimeInMs = systickGlobal;
+			analogTask();
 		}
 	}
 }
@@ -170,6 +273,20 @@ void keypadTask()
 				case '*':
 					backlightOff();
 				break;
+
+				default:
+					if (isdigit(pressedKey))
+					{
+						//This must be improved in order to not use literals
+						if (getMenuCurrentLevel() == 1 && getMenuCurrentItem() == 3)
+						{
+							DACSelectedValueInMv = (pressedKey - 48) * 100;
+							if (DACSelectedValueInMv != DACCurrentValueInMv)
+								menuSetDACValue(DACSelectedValueInMv);
+						}
+
+					}
+				break;
 			}
 
 			keypadTaskState = ST_KEY_WAITING_RELEASE;
@@ -184,10 +301,82 @@ void keypadTask()
 	}
 }
 
+void analogTask()
+{
+	static analogStates analogTaskState = ST_IDLE;
+	static uint8_t currentSampleIndex = 0;
+	static uint16_t accumulativeADCValue = 0;
+	//static float ADCResolutionInMv = (float)ANALOG_VREF_MV / (float)ADC_RES_BITS;
+	uint16_t temp;
+
+	if (DACSelectedValueInMv != DACCurrentValueInMv)
+	{
+		DACCurrentValueInMv = DACSelectedValueInMv;
+		writeDAC(DACCurrentValueInMv);
+	}
+
+	switch (analogTaskState)
+	{
+		case ST_IDLE:
+			currentSampleIndex = 0;
+			accumulativeADCValue = 0;
+			temp = 0;
+			analogTaskState = ST_SAMPLING;
+
+		break;
+
+		case ST_SAMPLING:
+			if (currentSampleIndex < ADC_SAMPLES)
+			{
+				readADCCh7(&temp);
+				accumulativeADCValue += temp;
+				currentSampleIndex++;
+			}
+			else
+				analogTaskState = ST_GET_VALUE;
+		break;
+
+		case ST_GET_VALUE:
+			accumulativeADCValue /= ADC_SAMPLES;
+			calculateNTCTemp(accumulativeADCValue);
+			NTCValueInC = getTempInC();
+			NTCValueInF = getTempInF();
+			menuSetTempValue(NTCValueInC, NTCValueInF);
+			analogTaskState = ST_IDLE;
+		break;
+	}
+}
+
+
 void counterTask()
 {
 	counter++;
 }
+
+/***********************************
+ * End Handler and Tasks functions
+ ***********************************/
+
+/****************************
+ * Timing functions
+ ****************************/
+void delay_us (uint16_t timeInUs)
+{
+	for(uint16_t j = 0; j < timeInUs; j++)
+	{
+		for (uint16_t i = 0; i < COUNTER_1_US; i++)
+		{
+			continue;
+		}
+	}
+}
+
+void delay_ms(uint16_t timeInMs)
+{
+	timeInMs += systickGlobal;
+	while (timeInMs > systickGlobal);
+}
+
 
 void SysTick_Handler(void)
 {
@@ -199,72 +388,24 @@ uint32_t getGlobalSystickValue()
 {
 	return systickGlobal;
 }
+/****************************
+ * End timing functions
+ ****************************/
 
-void taskHandler()
+/****************************
+ * Other functions
+ ****************************/
+void backlightOn()
 {
-	if(tick)
-	{
-		tick = 0;
-		if (taskIsReadtToRun(&LCDTaskData))
-		{
-			LCDTaskData.startTimeInMs = systickGlobal;
-			LCDTask();
-		}
-		if (taskIsReadtToRun(&keypadTaskData))
-		{
-			keypadTaskData.startTimeInMs = systickGlobal;
-			keypadTask();
-		}
-		if (taskIsReadtToRun(&counterTaskData))
-		{
-			counterTaskData.startTimeInMs = systickGlobal;
-			counterTask();
-		}
-	}
-
+	GPIO_SetBits(BACKLIGHT_PORT, BACKLIGHT_PIN);
+	backlightState = 1;
 }
-			
-void initGPIO()
+void backlightOff()
 {
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
-
-	GPIO_InitTypeDef GPIO_InitStruct;
-
-	//Inicializo BACKLIGHT
-	GPIO_InitStruct.GPIO_Pin = BACKLIGHT_PIN;
-	GPIO_InitStruct.GPIO_Mode = GPIO_Mode_OUT;
-	GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;
-	GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;
-	GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_NOPULL;
-	GPIO_Init(BACKLIGHT_PORT, &GPIO_InitStruct);
-
-	keypadInitStruct.nRows = N_ROWS;
-	keypadInitStruct.nCols = N_COLS;
-
-	keypadInitStruct.rowPins = rowsPortPin;
-	keypadInitStruct.colPins = colsPortPin;
-	keypadInitStruct.keyMapping = keypadKeyMapping;
-
-	keypadInit(keypadInitStruct);
-
-	LCD_init();
-	backlightOn();
+	GPIO_ResetBits(BACKLIGHT_PORT, BACKLIGHT_PIN);
+	backlightState = 0;
 }
 
-int main(void)
-{
-	SysTick_Config(SystemCoreClock / 1000);
-
-	initGPIO();
-
-	LCDTaskData.intervalInMs = 250;
-	keypadTaskData.intervalInMs = 10;
-	counterTaskData.intervalInMs = 1000;
-
-	while(1)
-	{
-		taskHandler();
-	}
-}
+/****************************
+ * End other functions
+ ****************************/

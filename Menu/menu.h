@@ -30,10 +30,14 @@ void buildMenu();
 uint8_t getStringLine(uint8_t lineIndex, uint8_t lineLength, char stringLine[MENU_LINE_LENGTH]);
 
 uint8_t getMenuHasChanged();
+uint8_t getMenuCurrentLevel();
+uint8_t getMenuCurrentItem();
 
 void menuSetPressedKey(uint8_t key);
 void menuSetCounter(uint16_t counter);
 void menuSetBacklight(uint8_t backlightState);
+void menuSetDACValue(uint16_t DACValueInMv);
+void menuSetTempValue(float tempValueInC, float tempValueInF);
 
 
 

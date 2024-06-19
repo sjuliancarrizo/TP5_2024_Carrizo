@@ -15,6 +15,7 @@
 #include "menu.h"
 #include "ctype.h"
 #include "analog.h"
+#include "ntc.h"
 
 #define COUNTER_1_US 13
 
@@ -61,6 +62,7 @@ uint32_t systickGlobal = 0;
 uint8_t pressedKey = NO_KEY, tick = 0, firstKey = 0, backlightState;
 uint16_t counter = 0, DACSelectedValueInMv = 0, DACCurrentValueInMv = 0, ADCValue;
 float ADCValueInMv;
+float NTCValueInC, NTCValueInF;
 
 taskData LCDTaskData, keypadTaskData, counterTaskData, analogTaskData;
 
@@ -304,7 +306,7 @@ void analogTask()
 	static analogStates analogTaskState = ST_IDLE;
 	static uint8_t currentSampleIndex = 0;
 	static uint16_t accumulativeADCValue = 0;
-	static float ADCResolutionInMv = (float)ANALOG_VREF_MV / (float)ADC_RES_BITS;
+	//static float ADCResolutionInMv = (float)ANALOG_VREF_MV / (float)ADC_RES_BITS;
 	uint16_t temp;
 
 	if (DACSelectedValueInMv != DACCurrentValueInMv)
@@ -336,9 +338,10 @@ void analogTask()
 
 		case ST_GET_VALUE:
 			accumulativeADCValue /= ADC_SAMPLES;
-			ADCValueInMv = accumulativeADCValue * ADCResolutionInMv;
-			//I'm sending voltage, not temp. This is just for testing.
-			menuSetTempValue(ADCValueInMv);
+			calculateNTCTemp(accumulativeADCValue);
+			NTCValueInC = getTempInC();
+			NTCValueInF = getTempInF();
+			menuSetTempValue(NTCValueInC, NTCValueInF);
 			analogTaskState = ST_IDLE;
 		break;
 	}

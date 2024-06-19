@@ -26,7 +26,7 @@ uint8_t _menuHasChanged = 1;
 uint8_t _key;
 uint16_t _counter;
 uint16_t _DACValueInMv;
-float _tempValue;
+float _tempValueInC, _tempValueInF;
 uint8_t _backlightState;
 char menuLine[MENU_LINES][MENU_LINE_LENGTH];
 
@@ -126,8 +126,10 @@ void buildMenu()
 			strcpy(menuLine[0],stringToPrint);
 		break;
 		case 4:
-			sprintf(stringToPrint, "TEMP: %.2f ºC", _tempValue);
+			sprintf(stringToPrint, "TEMP: %.2f \262C", _tempValueInC);
 			strcpy(menuLine[0],stringToPrint);
+			sprintf(stringToPrint, "TEMP: %.2f \262F", _tempValueInF);
+			strcpy(menuLine[1],stringToPrint);
 		break;
 		}
 	}
@@ -168,11 +170,12 @@ void menuSetDACValue(uint16_t DACValueInMv)
 	}
 }
 
-void menuSetTempValue(float tempValue)
+void menuSetTempValue(float tempValueInC, float tempValueInF)
 {
-	if (tempValue != _tempValue)
+	if ((tempValueInC != _tempValueInC) && (tempValueInF != _tempValueInF))
 	{
-		_tempValue = tempValue;
+		_tempValueInC = tempValueInC;
+		_tempValueInF = tempValueInF;
 		_menuHasChanged = 1;
 	}
 }
